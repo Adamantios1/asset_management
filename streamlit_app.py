@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import leafmap.foliumap as leafmap
+import geohash
 from geopy.distance import geodesic
 import folium
 
@@ -17,22 +18,35 @@ def load_data(file_path, file_type="csv"):
         data = pd.read_excel(file_path)
     return data
 
-# Function to filter data by radius
-def filter_data_by_radius(df, input_lat, input_long, radius):
-    filtered_rows = []  # Create an empty list to store filtered rows
-    input_location = (input_lat, input_long)
+# Function to geohash the entire dataframe
+def add_geohashes(df, lat_col="LAT_DEC", long_col="LONG_DEC", precision=6):
+    df["geohash"] = df.apply(lambda row: geohash.encode(row[lat_col], row[long_col], precision=precision), axis=1)
+    return df
 
-    for _, row in df.iterrows():
+# Function to find neighboring geohashes
+def find_sites_within_radius_by_geohash(df, input_lat, input_long, radius, geohash_precision=6):
+    # Compute geohash for the input location
+    input_geohash = geohash.encode(input_lat, input_long, precision=geohash_precision)
+    
+    # Find neighbors geohashes for the input location
+    geohash_neighbors = geohash.neighbors(input_geohash) + [input_geohash]
+    
+    # Filter sites that match the geohash or its neighbors
+    filtered_df = df[df["geohash"].isin(geohash_neighbors)]
+    
+    # Filter further by distance within the exact radius
+    filtered_rows = []
+    input_location = (input_lat, input_long)
+    for _, row in filtered_df.iterrows():
         site_location = (row["LAT_DEC"], row["LONG_DEC"])
         distance = geodesic(input_location, site_location).miles
-
         if distance <= radius:
             filtered_rows.append(row)
 
-    return pd.DataFrame(filtered_rows)  # Return DataFrame of nearby sites
+    return pd.DataFrame(filtered_rows)
 
 # Streamlit App
-st.title("Site Location Viewer with Batch Search")
+st.title("Optimized Site Location Viewer with Batch Search")
 
 # Load the data for nearby site search
 file_path = "source_file.csv"  # Adjust this to the actual CSV file name
@@ -44,6 +58,9 @@ if "LAT_DEC" not in df.columns or "LONG_DEC" not in df.columns:
 else:
     # Remove rows with missing lat/long values
     df = df.dropna(subset=["LAT_DEC", "LONG_DEC"])
+    
+    # Geohash the dataset
+    df = add_geohashes(df)
 
     if df.empty:
         st.warning("No valid latitude and longitude data found in the file.")
@@ -72,8 +89,8 @@ else:
                 st.session_state["lat_long"] = user_input
                 st.session_state["radius"] = radius
 
-                # Filter the data based on input
-                nearby_sites = filter_data_by_radius(df, input_lat, input_long, radius)
+                # Find nearby sites using geohashing
+                nearby_sites = find_sites_within_radius_by_geohash(df, input_lat, input_long, radius)
                 nearby_sites_count = len(nearby_sites)
 
                 st.success(f"Found {nearby_sites_count} nearby sites within {radius} miles.")
@@ -134,7 +151,7 @@ else:
                 for index, row in uploaded_data.iterrows():
                     input_lat = row["LAT_DEC"]
                     input_long = row["LONG_DEC"]
-                    nearby_sites_count = len(filter_data_by_radius(df, input_lat, input_long, radius))
+                    nearby_sites_count = len(find_sites_within_radius_by_geohash(df, input_lat, input_long, radius))
                     results.append({
                         "Latitude": input_lat,
                         "Longitude": input_long,
