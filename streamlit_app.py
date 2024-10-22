@@ -4,6 +4,10 @@ import leafmap.foliumap as leafmap
 import geohash
 from geopy.distance import geodesic
 import folium
+import requests
+
+# API Key for Lightbox
+API_KEY = 'j0dWrg4MZT6Glhc7obZCeJrEAAAF6s4B'
 
 # Function to load the CSV or Excel file
 @st.cache_data
@@ -22,6 +26,51 @@ def load_data(file_path, file_type="csv"):
 def add_geohashes(df, lat_col="LAT_DEC", long_col="LONG_DEC", precision=6):
     df["geohash"] = df.apply(lambda row: geohash.encode(row[lat_col], row[long_col], precision=precision), axis=1)
     return df
+
+# Function to call the Lightbox API and extract address, building height, footprint area, and ground elevation
+def get_lightbox_info(lat, long):
+    try:
+        # Create the API URL with reversed coordinates and properly encoded wkt
+        url = f"https://api.lightboxre.com/v1/structures/us/geometry?wkt=POINT%28{long}%20{lat}%29&bufferDistance=10&bufferUnit=ft&limit=1&offset=0"
+        headers = {
+            "accept": "application/json",
+            "x-api-key": API_KEY
+        }
+        
+        # Call the Lightbox API
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        # Extract address, building height, footprint area, and ground elevation
+        if data and "structures" in data and len(data["structures"]) > 0:
+            structure = data["structures"][0]
+            location = structure["location"]
+            street_address = location.get("streetAddress", "N/A")
+            city = location.get("locality", "N/A")
+            state = location.get("regionCode", "N/A")
+            postal_code = location.get("postalCode", "N/A")
+            address = f"{street_address}, {city}, {state} {postal_code}"
+            
+            # Extract and convert building height (meters to feet)
+            height_info = structure["physicalFeatures"]["height"]
+            building_height_meters = height_info["average"] if height_info else 0
+            building_height_feet = round(building_height_meters * 3.28, 2) if building_height_meters else "N/A"
+            
+            # Extract footprint area and convert to square feet
+            footprint_area_m2 = structure["physicalFeatures"]["area"].get("footprintArea", 0)
+            footprint_area_sqft = round(footprint_area_m2 * 10.764, 2) if footprint_area_m2 else "N/A"
+            
+            # Extract ground elevation (average) and convert to feet
+            ground_elevation_avg_meters = structure["physicalFeatures"]["groundElevation"].get("average", 0)
+            ground_elevation_avg_feet = round(ground_elevation_avg_meters * 3.28, 2) if ground_elevation_avg_meters else "N/A"
+
+            return address, building_height_feet, footprint_area_sqft, ground_elevation_avg_feet
+        else:
+            return "N/A", "N/A", "N/A", "N/A"
+    
+    except Exception as e:
+        st.error(f"Error calling Lightbox API: {str(e)}")
+        return "N/A", "N/A", "N/A", "N/A"
 
 # Function to find neighboring geohashes
 def find_sites_within_radius_by_geohash(df, input_lat, input_long, radius, geohash_precision=6):
@@ -46,7 +95,7 @@ def find_sites_within_radius_by_geohash(df, input_lat, input_long, radius, geoha
     return pd.DataFrame(filtered_rows)
 
 # Streamlit App
-st.title("Optimized Site Location Viewer with Batch Search")
+st.title("Optimized Site Location Viewer")
 
 # Load the data for nearby site search
 file_path = "source_file.csv"  # Adjust this to the actual CSV file name
@@ -65,7 +114,55 @@ else:
     if df.empty:
         st.warning("No valid latitude and longitude data found in the file.")
     else:
-        # Feature 1: Single Location Search
+        # Feature 1: Batch Search (moved first)
+        st.header("Batch Search for Multiple Locations")
+
+        # Add a radius input field for the batch search
+        batch_radius = st.number_input("Radius for Batch Search (miles)", min_value=0.1, value=0.1, step=0.1, format="%.1f")
+
+        # File upload widget
+        uploaded_file = st.file_uploader("Upload a CSV or Excel file with lat/long for batch search", type=["csv", "xlsx"])
+        if uploaded_file is not None:
+            # Determine the file type
+            file_type = "csv" if uploaded_file.name.endswith(".csv") else "excel"
+            
+            # Load the uploaded data
+            uploaded_data = load_data(uploaded_file, file_type)
+
+            # Check if required columns exist
+            if "LAT_DEC" not in uploaded_data.columns or "LONG_DEC" not in uploaded_data.columns:
+                st.error("The uploaded file must contain 'LAT_DEC' and 'LONG_DEC' columns.")
+            else:
+                # Process batch search
+                st.write(f"Processing batch search for {len(uploaded_data)} locations...")
+
+                results = []
+                for index, row in uploaded_data.iterrows():
+                    input_lat = row["LAT_DEC"]
+                    input_long = row["LONG_DEC"]
+                    nearby_sites_count = len(find_sites_within_radius_by_geohash(df, input_lat, input_long, batch_radius))
+                    
+                    # Call Lightbox API for address, building height, footprint area, and ground elevation
+                    address, building_height, footprint_area, ground_elevation = get_lightbox_info(input_lat, input_long)
+                    
+                    results.append({
+                        "Latitude": input_lat,
+                        "Longitude": input_long,
+                        "Nearby Sites Count": nearby_sites_count,
+                        "Address": address,
+                        "Building Height (ft)": building_height,
+                        "Footprint Area (sq ft)": footprint_area,
+                        "Ground Elevation (avg, ft)": ground_elevation
+                    })
+
+                # Convert results to a DataFrame
+                results_df = pd.DataFrame(results)
+                
+                # Display the results as a table
+                st.write("Batch Search Results:")
+                st.dataframe(results_df)
+
+        # Feature 2: Single Location Search (moved second)
         st.header("Single Location Search")
         if "lat_long" not in st.session_state:
             st.session_state["lat_long"] = ""
@@ -94,6 +191,13 @@ else:
                 nearby_sites_count = len(nearby_sites)
 
                 st.success(f"Found {nearby_sites_count} nearby sites within {radius} miles.")
+
+                # Call Lightbox API for address and building height
+                address, building_height, footprint_area, ground_elevation = get_lightbox_info(input_lat, input_long)
+                st.write(f"Address: {address}")
+                st.write(f"Building Height: {building_height} feet")
+                st.write(f"Footprint Area: {footprint_area} sq ft")
+                st.write(f"Ground Elevation (average): {ground_elevation} meters")
 
                 # Display the map for the single location search
                 if nearby_sites_count > 0:
@@ -127,40 +231,3 @@ else:
 
             except ValueError:
                 st.error("Invalid input. Please enter valid latitude and longitude.")
-        
-        # Feature 2: Batch Search
-        st.header("Batch Search for Multiple Locations")
-
-        # File upload widget
-        uploaded_file = st.file_uploader("Upload a CSV or Excel file with lat/long for batch search", type=["csv", "xlsx"])
-        if uploaded_file is not None:
-            # Determine the file type
-            file_type = "csv" if uploaded_file.name.endswith(".csv") else "excel"
-            
-            # Load the uploaded data
-            uploaded_data = load_data(uploaded_file, file_type)
-
-            # Check if required columns exist
-            if "LAT_DEC" not in uploaded_data.columns or "LONG_DEC" not in uploaded_data.columns:
-                st.error("The uploaded file must contain 'LAT_DEC' and 'LONG_DEC' columns.")
-            else:
-                # Process batch search
-                st.write(f"Processing batch search for {len(uploaded_data)} locations...")
-
-                results = []
-                for index, row in uploaded_data.iterrows():
-                    input_lat = row["LAT_DEC"]
-                    input_long = row["LONG_DEC"]
-                    nearby_sites_count = len(find_sites_within_radius_by_geohash(df, input_lat, input_long, radius))
-                    results.append({
-                        "Latitude": input_lat,
-                        "Longitude": input_long,
-                        "Nearby Sites Count": nearby_sites_count
-                    })
-
-                # Convert results to a DataFrame
-                results_df = pd.DataFrame(results)
-                
-                # Display the results as a table
-                st.write("Batch Search Results:")
-                st.dataframe(results_df)
