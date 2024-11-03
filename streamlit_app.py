@@ -4,6 +4,7 @@ import leafmap.foliumap as leafmap
 import geohash
 from geopy.distance import geodesic
 import folium
+from folium.plugins import Fullscreen  # Import Fullscreen plugin
 import requests
 
 # API Key for Lightbox
@@ -199,10 +200,21 @@ else:
                 st.write(f"Footprint Area: {footprint_area} sq ft")
                 st.write(f"Ground Elevation (average): {ground_elevation} meters")
 
+                # Define a full-screen toggle state in Streamlit session
+                if "fullscreen" not in st.session_state:
+                    st.session_state["fullscreen"] = False  # Start with regular size
+
+                # Toggle button to adjust between regular and full-screen map view
+                if st.button("Toggle Fullscreen Map"):
+                    st.session_state["fullscreen"] = not st.session_state["fullscreen"]
+
+                # Set map height based on full-screen toggle state
+                map_height = 800 if st.session_state["fullscreen"] else 600  # Set 800px for full-screen, 600px otherwise
+
                 # Display the map for the single location search
                 if nearby_sites_count > 0:
-                    # Create the map
-                    m = leafmap.Map(center=[input_lat, input_long], zoom=10)
+                    # Create the map without fullscreen control
+                    m = leafmap.Map(center=[input_lat, input_long], zoom=10, fullscreen_control=False)
 
                     # Add user location marker (green icon)
                     user_icon = folium.Icon(icon="user", prefix="fa", color="green")
@@ -222,8 +234,8 @@ else:
                         site_icon = folium.Icon(icon="wifi", prefix="fa", color="blue")
                         m.add_marker(location=(lat, long), popup=popup_info, icon=site_icon)
 
-                    # Display the map
-                    m.to_streamlit(height=600)
+                    # Display the map in Streamlit, adjusting the height dynamically
+                    m.to_streamlit(height=map_height)
 
                     # Display the filtered data in a table
                     st.write("Nearby Sites:")
@@ -231,3 +243,138 @@ else:
 
             except ValueError:
                 st.error("Invalid input. Please enter valid latitude and longitude.")
+# Function to call the Lightbox Parcel API and extract land use and owner information
+def get_parcel_info(lat, long):
+    try:
+        # Create the API URL with reversed coordinates and properly encoded wkt
+        url = f"https://api.lightboxre.com/v1/parcels/us/geometry?wkt=POINT%28{long}%20{lat}%29&bufferDistance=10&bufferUnit=ft&limit=1&offset=0"
+        headers = {
+            "accept": "application/json",
+            "x-api-key": API_KEY
+        }
+        
+        # Call the Lightbox API for parcels
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        
+        # Extract relevant parcel information
+        if data and "parcels" in data and len(data["parcels"]) > 0:
+            parcel = data["parcels"][0]
+            
+            # Extract land use information
+            land_use = parcel.get("landUse", {})
+            land_use_description = land_use.get("normalized", {}).get("description", "N/A")
+            land_use_category = land_use.get("normalized", {}).get("categoryDescription", "N/A")
+            
+            # Extract owner information
+            owner_info = parcel.get("owner", {})
+            owner_name = owner_info.get("names", [{}])[0].get("fullName", "N/A")
+            owner_street = owner_info.get("streetAddress", "N/A")
+            owner_city = owner_info.get("locality", "N/A")
+            owner_state = owner_info.get("regionCode", "N/A")
+            owner_zip = owner_info.get("postalCode", "N/A")
+            owner_full_address = f"{owner_street}, {owner_city}, {owner_state} {owner_zip}"
+            ownership_status = owner_info.get("ownershipStatus", {}).get("description", "N/A")
+            
+            return {
+                "Land Use Description": land_use_description,
+                "Land Use Category": land_use_category,
+                "Owner Name": owner_name,
+                "Owner Address": owner_full_address,
+                "Ownership Status": ownership_status
+            }
+        else:
+            return {
+                "Land Use Description": "N/A",
+                "Land Use Category": "N/A",
+                "Owner Name": "N/A",
+                "Owner Address": "N/A",
+                "Ownership Status": "N/A"
+            }
+    
+    except Exception as e:
+        st.error(f"Error calling Lightbox Parcel API: {str(e)}")
+        return {
+            "Land Use Description": "N/A",
+            "Land Use Category": "N/A",
+            "Owner Name": "N/A",
+            "Owner Address": "N/A",
+            "Ownership Status": "N/A"
+        }
+
+# Streamlit Section for Parcel Information Search
+st.header("Parcel Information Search")
+
+# Single input for latitude and longitude
+parcel_input = st.text_input("Enter Latitude and Longitude (separated by a comma or space) for Parcel Search")
+
+# Button to trigger the parcel search
+parcel_button = st.button("Get Parcel Information")
+
+# Extract lat and long if parcel button is clicked and input is valid
+if parcel_button and parcel_input:
+    try:
+        # Parse the input for latitude and longitude, allowing comma or space
+        if ',' in parcel_input:
+            parcel_lat, parcel_long = map(float, parcel_input.split(','))
+        else:
+            parcel_lat, parcel_long = map(float, parcel_input.split())
+        
+        # Call the Lightbox Parcel API
+        parcel_info = get_parcel_info(parcel_lat, parcel_long)
+        
+        # Display parcel information
+        st.write("### Parcel Information")
+        st.write(f"**Land Use Description**: {parcel_info['Land Use Description']}")
+        st.write(f"**Land Use Category**: {parcel_info['Land Use Category']}")
+        st.write(f"**Owner Name**: {parcel_info['Owner Name']}")
+        st.write(f"**Owner Address**: {parcel_info['Owner Address']}")
+        st.write(f"**Ownership Status**: {parcel_info['Ownership Status']}")
+
+    except ValueError:
+        st.error("Invalid input. Please enter valid latitude and longitude values.")
+import pandas as pd
+
+# Streamlit Section for Batch Parcel Information Search
+st.header("Batch Parcel Information Search")
+
+# File upload widget
+uploaded_parcel_file = st.file_uploader("Upload an Excel file with Latitude and Longitude columns for Parcel Search", type="xlsx")
+
+# Process the uploaded file if available
+if uploaded_parcel_file is not None:
+    # Load the Excel file into a DataFrame
+    parcel_df = pd.read_excel(uploaded_parcel_file)
+
+    # Check for required columns
+    if "LAT_DEC" not in parcel_df.columns or "LONG_DEC" not in parcel_df.columns:
+        st.error("The uploaded file must contain 'LAT_DEC' and 'LONG_DEC' columns.")
+    else:
+        # Initialize a list to store results
+        parcel_results = []
+
+        # Loop through each row in the uploaded DataFrame
+        for _, row in parcel_df.iterrows():
+            lat = row["LAT_DEC"]
+            long = row["LONG_DEC"]
+
+            # Fetch parcel information using the API for each lat/long
+            parcel_info = get_parcel_info(lat, long)
+            
+            # Append the result to the list
+            parcel_results.append({
+                "Latitude": lat,
+                "Longitude": long,
+                "Land Use Description": parcel_info["Land Use Description"],
+                "Land Use Category": parcel_info["Land Use Category"],
+                "Owner Name": parcel_info["Owner Name"],
+                "Owner Address": parcel_info["Owner Address"],
+                "Ownership Status": parcel_info["Ownership Status"]
+            })
+
+        # Convert the results list into a DataFrame
+        results_df = pd.DataFrame(parcel_results)
+
+        # Display the results in a table
+        st.write("### Batch Parcel Search Results")
+        st.dataframe(results_df)
